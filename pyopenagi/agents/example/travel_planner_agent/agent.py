@@ -1,4 +1,4 @@
-import re
+import re, time
 
 from ...react_agent import ReactAgent
 
@@ -7,6 +7,18 @@ from ....utils.chat_template import Query
 from typing import List
 
 from prompts import ZEROSHOT_REACT_INSTRUCTION
+
+
+actionMapping = {"FlightSearch":"flights",
+                 "AttractionSearch":"attractions",
+                 "GoogleDistanceMatrix":"googleDistanceMatrix",
+                 "AccommodationSearch":"accommodation",
+                 "RestaurantSearch":"restaurants",
+                 "Planner":"planner","NotebookWrite":
+                 "notebook",
+                 "CitySearch":"cities"}
+
+INVALID_ACTION = "invalidAction"
 
 class TravelPlannerAgent(ReactAgent):
     """Reproduced the ReActAgent from the paper 👉
@@ -32,13 +44,15 @@ class TravelPlannerAgent(ReactAgent):
         self.mode = mode
         self.finished = False
 
+        self.current_observation = ''
+
         if self.mode == 'zero_shot':
             self.agent_prompt = ''
 
         self.illegal_early_stop_patience = illegal_early_stop_patience
         self.max_retries = max_retries
         self.retry_record = {key: 0 for key in self.tools}
-        self.retry_record['invalidAction'] = 0
+        self.retry_record[INVALID_ACTION] = 0
 
         self.last_actions = []
 
@@ -64,11 +78,11 @@ class TravelPlannerAgent(ReactAgent):
                 "role": "assistant", "content": f'Thought {self.rounds + 1}: '
             })
             response, start_times, end_times, waiting_times, turnaround_times = self.get_response(
-                    query = Query(
-                        messages = self.messages,
-                        tools = None
-                    )
-                )     
+                query = Query(
+                    messages = self.messages,
+                    tools = None
+                )
+            )     
             self.request_waiting_times.extend(waiting_times)
             self.request_turnaround_times.extend(turnaround_times)
             if self.rounds == 0:
@@ -84,11 +98,11 @@ class TravelPlannerAgent(ReactAgent):
                 "role": "assistant", "content": f'Action {self.rounds + 1}: '
             })
             response, start_times, end_times, waiting_times, turnaround_times = self.get_response(
-                    query = Query(
-                        messages = self.messages,
-                        tools = None
-                    )
+                query = Query(
+                    messages = self.messages,
+                    tools = None
                 )
+            )
             self.request_waiting_times.extend(waiting_times)
             self.request_turnaround_times.extend(turnaround_times)
 
@@ -109,7 +123,7 @@ class TravelPlannerAgent(ReactAgent):
             
             # examine if the same action has been repeated 3 times consecutively
             if len(self.last_actions) == 3:
-                self.logger.log("The same action has been repeated 3 times consecutively. So we stop here.", level="info")
+                self.logger.log("The same action has been repeated 3 times consecutively. So we stop here.\n", level="info")
                 self.finished = True
                 return {
                     "agent_name": self.agent_name,
@@ -126,13 +140,51 @@ class TravelPlannerAgent(ReactAgent):
                 "role": "assistant", "content": f'Observation {self.rounds + 1}: '
             })
 
-            if action == None or action == '' or action == '\n':
+            none_action = (action == None or action == '' or action == '\n')
+            if none_action:
                 self.messages[-1]["content"] += """No feedback from the environment due to the null action.
                   Please make sure your action does not start with [Thought, Action, Observation]."""
             else:
-                action_type, action_arg = parse_action(action)   
-        
+                action_type, action_arg = parse_action(action) 
 
+                if action_type != "Planner":
+                    if action_type in actionMapping:
+                        pending_action = actionMapping[action_type]
+                    else:
+                        pending_action = INVALID_ACTION
+
+                    if self.retry_record[pending_action] + 1 > self.max_retries:
+                        action_type = "Planner"
+                        self.logger.log(f"{pending_action} early stop due to {self.max_retries} max retries.\n", "info")
+                        self.finished = True
+                        continue
+                
+                self.action_dispatch(action_type, action_arg)
+
+            if none_action:
+                self.logger.log(f"Observation {self.rounds + 1}: No feedback from the environment due to the null action.\n")
+            else:
+                self.logger.log(f"Observation {self.rounds + 1}: {self.current_observation}\n", "info")   
+
+            if action_type and action_type == 'Planner' and self.retry_record['planner'] == 0:
+                self.finished = True
+                self.answer = self.current_observation
+                continue
+
+            self.rounds += 1   
+
+        self.set_status("done")
+        self.set_end_time(time=time.time())
+
+        return {
+                "agent_name": self.agent_name,
+                "result": self.answer,
+                "rounds": self.rounds,
+                "agent_waiting_time": self.start_time - self.created_time,
+                "agent_turnaround_time": self.end_time - self.created_time,
+                "request_waiting_times": self.request_waiting_times,
+                "request_turnaround_times": self.request_turnaround_times,
+            }  
 
     def build_system_instruction(self):
         self.messages.append({
@@ -144,6 +196,15 @@ class TravelPlannerAgent(ReactAgent):
     
     def is_finished(self) -> bool:
         return self.finished
+    
+    def action_dispatch(self, action_type: str, action_arg: str) -> None:
+        """call tools by action_type
+
+        Args:
+            action_type (str): type
+            action_arg (str): args
+        """
+        pass
 
     def load_city(self, city_set_path: str) -> List[str]:
         city_set = []
