@@ -4,9 +4,11 @@ from ...react_agent import ReactAgent
 
 from ....utils.chat_template import Query
 
-from typing import List
+from typing import List, Set
 
 from prompts import ZEROSHOT_REACT_INSTRUCTION
+
+from pandas import DataFrame
 
 
 actionMapping = {"FlightSearch":"flights",
@@ -161,6 +163,9 @@ class TravelPlannerAgent(ReactAgent):
                 
                 self.action_dispatch(action_type, action_arg)
 
+                self.messages[-1]["content"] += self.current_observation
+                self.logger.log(f"{self.messages[-1]["content"]}")
+
             if none_action:
                 self.logger.log(f"Observation {self.rounds + 1}: No feedback from the environment due to the null action.\n")
             else:
@@ -198,22 +203,66 @@ class TravelPlannerAgent(ReactAgent):
         return self.finished
     
     def action_dispatch(self, action_type: str, action_arg: str) -> None:
-        """call tools by action_type
+        """call coresponding tools by action_type
 
         Args:
             action_type (str): type
             action_arg (str): args
         """
-        pass
+        args = action_arg.split(', ')
+        action_name = actionMapping[action_type]
 
-    def load_city(self, city_set_path: str) -> List[str]:
+        if action_type == 'Planner':
+            self.current_observation = to_string(self.tool_list[action_name]
+                                                 .run(self.tool_list[actionMapping["NotebookWrite"].list_all()], *args))
+            self.answer = self.current_observation
+            self.__reset_record()  
+
+        elif action_type == 'NotebookWrite':
+            try:
+                self.current_observation = to_string(self.tool_list[action_name].run(self.current_data, *args))
+                self.__reset_record()
+            
+            except Exception as e:
+                self.retry_record[action_name] += 1
+                self.current_observation = to_string(e)
+
+        elif action_type in self.tool_names:
+            action_name = actionMapping[action_type]
+            try:
+                self.current_data = self.tool_list[action_name].run(*args)
+                self.current_observation = to_string(self.current_data)
+                self.__reset_record()
+
+            except Exception as e:
+                self.retry_record[action_name] += 1
+                self.current_observation = to_string(e)
+        
+        else:
+            self.retry_record[INVALID_ACTION] += 1
+            self.current_observation = '''Invalid Action. Valid Actions are  
+            FlightSearch[Departure City, Destination City, Date] /
+              AccommodationSearch[City] /  
+              RestaurantSearch[City] / 
+              NotebookWrite[Short Description] / 
+              AttractionSearch[City] / 
+              CitySearch[State] / 
+              GoogleDistanceMatrix[Origin, Destination, Mode] and Planner[Query].'''
+     
+
+    def load_city(self, city_set_path: str) -> Set[str]:
         city_set = []
         lines = open(city_set_path, 'r').read().strip().split('\n')
         for unit in lines:
             city_set.append(unit)
-        return city_set    
+        return set(city_set)  
+
+    def __reset_record(self) -> None:
+        self.retry_record = {key: 0 for key in self.retry_record}
+        self.retry_record[INVALID_ACTION] = 0  
     
 
+#utils
 def parse_action(string: str) -> tuple[str, str]:
     """match action type and action arg
 
@@ -236,3 +285,22 @@ def parse_action(string: str) -> tuple[str, str]:
         
     except:
         return None, None
+    
+def validate_date_format(date_list: List[str]) -> bool:
+    for date in date_list:
+        pattern = r'^\d{4}-\d{2}-\d{2}$'
+        if not re.match(pattern, date):
+            return False
+    return True
+
+def valid_city_format(city_list: List[str], city_set: Set[str]) -> bool:
+    return set(city_list).issubset(city_set) 
+
+def to_string(data) -> str:
+    if data is not None:
+        if type(data) == DataFrame:
+            return data.to_string(index=False)
+        else:
+            return str(data)
+    else:
+        return str(None)
